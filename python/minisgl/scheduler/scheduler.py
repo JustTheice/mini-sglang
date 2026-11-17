@@ -107,14 +107,20 @@ class Scheduler(SchedulerIOMixin):
 
     def normal_loop(self) -> None:
         blocking = not (self.prefill_manager.runnable or self.decode_manager.runnable)
+        
+        # 1. 收到请求，加入待处理队列（Prefill队列）
         for msg in self.receive_msg(blocking=blocking):
             self._process_one_msg(msg)
 
+        # 2. 选择请求，准备本轮计算
         forward_input = self._schedule_next_batch()
         ongoing_data = None
+
+        # 3. 执行模型
         if forward_input is not None:
             ongoing_data = (forward_input, self._forward(forward_input))
 
+        # 4. 处理生成结果
         self._process_last_data(ongoing_data)
 
     @torch.inference_mode()
@@ -141,20 +147,25 @@ class Scheduler(SchedulerIOMixin):
 
         batch, (_, next_tokens_cpu, copy_done) = last_data[0].batch, last_data[1]
         copy_done.synchronize()
+        # 准备回复列表，逐个处理释放请求
         reply: List[DetokenizeMsg] = []
         new_finished_reqs: Set[Req] = set()
         with self.cache_manager.lazy_free_region():
             for i, req in enumerate(batch.reqs):
+                # ChunkedReq的Req的prefill肯定没有完成，跳过
                 if isinstance(req, ChunkedReq):
                     continue
+
                 next_token = next_tokens_cpu[i]
                 req.append_host(next_token.unsqueeze(0))
                 next_token = int(next_token.item())
+                # 判断请求是否结束，构造回复消息
                 finished = not req.can_decode
                 if not req.sampling_params.ignore_eos:
                     finished |= next_token == self.eos_token_id
                 reply.append(DetokenizeMsg(uid=req.uid, next_token=next_token, finished=finished))
 
+                # 若为decode结束则释放资源；若为prefil结束则登记前缀缓存
                 # NOTE: overlap scheduling may make the request freed twice, skip second free
                 if finished and req not in self.finished_reqs:
                     self.decode_manager.remove_req(req)
@@ -202,13 +213,21 @@ class Scheduler(SchedulerIOMixin):
         self.cache_manager.cache_req(req, finished=True)
 
     def _prepare_batch(self, batch: Batch) -> ForwardInput:
+        # 为batch补充dummy请求以匹配已经捕获的 CUDA Graph
         self.engine.graph_runner.pad_batch(batch)
+        # 给本轮Req分配KV slot并同步到page_table中；page_table.shape = [max_running_req + 1, aligned_max_seq_len]
         self.cache_manager.allocate_paged(batch.reqs)
+        # 生成本轮各Req中token的positions用于后续RoPe计算
         batch.positions = _make_positions(batch, self.device)
+        # 生成读取input_ids所需的二维索引；input_mapping = (table_indices, positions); eg. input_mapping = ([2,2,2,3,3], [0,1,2,0,1])
         input_mapping = _make_input_tuple(batch, self.device)
+        # 生成写回位置索引；write_mapping = (table_indices, output_positions)；eg. write_mapping = ([2,3], [3,2])
         write_mapping = _make_write_tuple(batch, self.device)
+        # 查出本轮token对应的 K/V slot
         batch.out_loc = self.engine.page_table[input_mapping]
+        # 准备 Attention 元数据
         self.engine.attn_backend.prepare_metadata(batch)
+        # 打包返回
         return ForwardInput(
             batch=batch,
             sample_args=self.engine.sampler.prepare(batch),
@@ -226,9 +245,13 @@ class Scheduler(SchedulerIOMixin):
 
     def _forward(self, forward_input: ForwardInput) -> ForwardOutput:
         batch, sample_args, input_mapping, output_mapping = forward_input
+        # 1. 按之前准备的索引，取出本轮输入 token
         batch.input_ids = self.token_pool[input_mapping]
+        # 2. 前向计算、更新请求长度、采样
         forward_output = self.engine.forward_batch(batch, sample_args)
+        # 3. 把新 token ID 写回 GPU token_pool
         self.token_pool[output_mapping] = forward_output.next_tokens_gpu
+        # 4. 更新后续参与 Decode 的请求集合
         self.decode_manager.filter_reqs(forward_input.batch.reqs)
         return forward_output
 

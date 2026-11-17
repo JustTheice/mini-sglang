@@ -27,8 +27,8 @@ class RadixTreeNode:
         self.timestamp = tic or time.monotonic_ns()
 
         # these fields should be updated later
-        self._key: torch.Tensor
-        self._value: torch.Tensor
+        self._key: torch.Tensor     # 该节点保存的一段 token IDs
+        self._value: torch.Tensor       # 这段 token IDs 对应的物理 KV slot
         self._length: int
 
     def set_key_value(self, key: torch.Tensor, value: torch.Tensor) -> None:
@@ -203,6 +203,7 @@ class RadixPrefixCache(BasePrefixCache):
         return leave_nodes
 
     def _tree_walk(self, input_ids: torch.Tensor) -> Tuple[RadixTreeNode, int]:
+        """找到与输入 token IDs 匹配的node和prefix_len，以page_size为单位"""
         prefix_len = 0
         indice_len = len(input_ids)
         node = self.root_node
@@ -216,7 +217,7 @@ class RadixPrefixCache(BasePrefixCache):
 
             # NOTE: at least 1 page is matched, so match_len >= page_size
             match_len = node.get_match_len(input_ids[prefix_len:])
-            match_len = align_down(match_len, self.page_size)
+            match_len = align_down(match_len, self.page_size) # 将match_len按页对齐(下取整)
             prefix_len += match_len
 
             # need to split the node if not fully matched

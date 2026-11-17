@@ -93,6 +93,7 @@ class PrefillAdder:
         if self.token_budget <= 0:
             return None
 
+        # 如果是上一轮没处理完的分块请求，接着处理
         if chunked_req := pending_req.chunked_req:
             return self._add_one_req(
                 pending_req=pending_req,
@@ -101,6 +102,7 @@ class PrefillAdder:
                 cached_len=chunked_req.cached_len,
             )
 
+        # 如果是新请求，先尝试获取资源，再处理
         if resource := self._try_allocate_one(pending_req):
             cache_handle, table_idx = resource
             return self._add_one_req(
@@ -134,6 +136,8 @@ class PrefillManager:
             cache_manager=self.cache_manager,
             table_manager=self.table_manager,
         )
+
+        # 不断从pending list中取Req，若不能完整装下一个Req则对它切chunk
         reqs: List[Req] = []
         chunked_list: List[PendingReq] = []
         for pending_req in self.pending_list:

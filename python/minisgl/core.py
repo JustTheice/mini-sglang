@@ -45,6 +45,7 @@ class Req:
     def remain_len(self) -> int:
         return self.max_device_len - self.device_len
 
+    # 本轮需要计算的 token 数 extend_len = device_len - cached_len
     @property
     def extend_len(self) -> int:
         return self.device_len - self.cached_len
@@ -74,8 +75,8 @@ class Batch:
     phase: Literal["prefill", "decode"]
     # these fields should be set by scheduler
     input_ids: torch.Tensor = field(init=False)
-    positions: torch.Tensor = field(init=False)
-    out_loc: torch.Tensor = field(init=False)
+    positions: torch.Tensor = field(init=False)  # token 在请求序列中的逻辑位置，用于 RoPE 等位置计算，从 0 开始
+    out_loc: torch.Tensor = field(init=False)  # 该 token 的 K/V 要写入的物理 slot
     padded_reqs: List[Req] = field(init=False)
     # this field should be set by attention backend
     attn_metadata: BaseAttnMetadata = field(init=False)
